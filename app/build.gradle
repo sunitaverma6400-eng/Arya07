@@ -40,6 +40,7 @@ android {
                 install "tinydb"
 
                 // ── Background jobs ──
+                install "tzdata"
                 install "apscheduler"
 
                 // ── Image search ──
