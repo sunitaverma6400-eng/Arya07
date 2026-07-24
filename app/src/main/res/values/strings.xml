@@ -1,0 +1,11 @@
+<resources>
+    <string name="app_name">Jarvis</string>
+    <string name="perm_title">Jarvis ko permissions chahiye</string>
+    <string name="perm_subtitle">Sab allow karo taaki calls, SMS, voice, camera, location, aur background me chalna — sab kaam kare.</string>
+    <string name="perm_grant_all">Sab Allow Karo</string>
+    <string name="perm_continue">Jarvis Shuru Karo</string>
+    <string name="perm_battery">Battery optimization se bhi exempt karo (background me na roke)</string>
+    <string name="service_notif_title">Jarvis chal raha hai</string>
+    <string name="service_notif_text">Background me active — tap karke kholo</string>
+    <string name="loading">Jarvis taiyaar ho raha hai…</string>
+</resources>

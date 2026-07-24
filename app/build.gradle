@@ -1,0 +1,105 @@
+plugins {
+    id 'com.android.application'
+    id 'org.jetbrains.kotlin.android'
+    id 'com.chaquo.python'
+}
+
+android {
+    namespace 'com.jarvis.assistant'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.jarvis.assistant"
+        minSdk 26
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+
+        ndk {
+            // Sirf real-phone ABIs — APK size chhota rakhne ke liye
+            abiFilters "arm64-v8a", "armeabi-v7a"
+        }
+
+        python {
+            // GitHub Actions Ubuntu runner par python3 preinstalled hota hai
+            buildPython "python3"
+
+            pip {
+                // ── Core server ──
+                install "flask==3.0.3"
+                install "requests==2.32.3"
+
+                // ── Phone-call assistant (Twilio) ──
+                install "twilio"
+
+                // ── AI / LLM ──
+                install "groq"
+
+                // ── Memory ──
+                install "tinydb"
+
+                // ── Background jobs ──
+                install "apscheduler"
+
+                // ── Image search ──
+                install "icrawler"
+
+                // ── YouTube stream extraction ──
+                install "yt-dlp"
+
+                // ── Voice (TTS) ──
+                install "edge-tts"
+                install "pydub"
+
+                // ── File read ──
+                install "PyPDF2"
+                install "openpyxl"
+                install "docx2txt"
+
+                // ── File generation ──
+                install "reportlab"
+                install "python-docx"
+
+                // ── Anti-bot bypass ──
+                install "cloudscraper"
+
+                // ── Image generation client ──
+                install "huggingface_hub"
+                install "Pillow"
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android-optimize.txt'), 'proguard-rules.pro'
+        }
+        debug { }
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
+    }
+    kotlinOptions {
+        jvmTarget = "17"
+    }
+    buildFeatures {
+        viewBinding true
+    }
+    packagingOptions {
+        jniLibs {
+            useLegacyPackaging true
+        }
+    }
+}
+
+dependencies {
+    implementation 'androidx.core:core-ktx:1.13.1'
+    implementation 'androidx.appcompat:appcompat:1.7.0'
+    implementation 'com.google.android.material:material:1.12.0'
+    implementation 'androidx.constraintlayout:constraintlayout:2.1.4'
+    implementation 'androidx.activity:activity-ktx:1.9.1'
+    implementation 'androidx.webkit:webkit:1.11.0'
+}
