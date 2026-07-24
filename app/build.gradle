@@ -33,6 +33,7 @@ android {
                 install "twilio"
 
                 // ── AI / LLM ──
+                install "pydantic<2,>=1.9.0"
                 install "groq"
 
                 // ── Memory ──
