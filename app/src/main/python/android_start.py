@@ -1,17 +1,12 @@
 """
 android_start.py
 -----------------
-Yeh module Android app ka Python entrypoint hai. JarvisService.kt is module
-ko Chaquopy se import karke `start(context)` call karta hai.
-
-`server.py` ko normal import karne se uske top-level setup (Flask routes
-register, keepalive/memory_guard/scheduler start) already chal jaata hai —
-uska `if __name__ == "__main__":` block yahan nahi chalega (kyunki import
-ke waqt naam "server" hota hai, "__main__" nahi), isliye humein khud
-`app.run()` ek background thread mein explicitly call karna padta hai.
+Android app ka Python entrypoint. Agar server import/start fail ho,
+to poora traceback hi 127.0.0.1:5000 par dikha dete hain (debug ke liye).
 """
 
 import threading
+import traceback
 
 _started = False
 _thread = None
@@ -25,11 +20,22 @@ def start(context, port: int = 5000):
     import native_android
     native_android.set_context(context)
 
-    import server  # module-level setup (routes, scheduler, keepalive) yahin chal jaata hai
+    try:
+        import server as _server_module
+        app = _server_module.app
+    except Exception:
+        tb = traceback.format_exc()
+        from flask import Flask
+        app = Flask(__name__)
+
+        @app.route("/", defaults={"path": ""})
+        @app.route("/<path:path>")
+        def _err(path):
+            return "<pre style='white-space:pre-wrap;font-size:14px'>" + tb + "</pre>", 500
 
     def _run():
-        server.app.run(host="127.0.0.1", port=port, threaded=True,
-                        use_reloader=False, debug=False)
+        app.run(host="127.0.0.1", port=port, threaded=True,
+                 use_reloader=False, debug=False)
 
     _thread = threading.Thread(target=_run, name="jarvis-flask", daemon=True)
     _thread.start()
