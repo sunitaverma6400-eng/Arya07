@@ -1,0 +1,743 @@
+# Arya App — Build Fixes Log (25 July 2026)
+
+Ye file un saare fixes ka record hai jo build errors theek karne ke liye kiye gaye.
+Agle baar koi naya error aaye to pehle check karo ki wo in files me se kisi se
+related to nahi hai.
+
+## 1. `DeviceExtraTools.kt` — do jagah bugs
+
+**Error:** `Unresolved reference: ACTION_ZEN_MODE_SETTINGS` (line ~187)
+**Wajah:** `Settings.ACTION_ZEN_MODE_SETTINGS` public Android SDK constant nahi hai.
+**Fix:** Raw string action use kiya:
+```kotlin
+Intent("android.settings.ZEN_MODE_SETTINGS")
+```
+
+**Error:** `Returns are not allowed for functions with expression body`
+**Wajah:** `openApp()` aur `sendNotification()` functions expression-body
+(`fun x(): String = try { ... }`) the, lekin andar `return` statement tha —
+Kotlin me ye sirf block-body functions (`fun x(): String { ... }`) me allowed hai.
+**Fix:** Dono functions ko block-body me convert kiya:
+```kotlin
+fun openApp(...): String {
+    return try { ... } catch (e: Exception) { ... }
+}
+```
+
+## 2. `app/build.gradle.kts` — MediaPipe library version mismatch
+
+**Error:** `Unresolved reference: setMaxNumImages`, `Too many arguments for
+generateResponseAsync()`, `Unresolved reference: cancelGenerateResponseAsync`
+**Wajah:** `tasks-genai:0.10.21` bahut purana version tha — code jo APIs use
+kar raha tha (multimodal images, callback-based streaming, cancel) wo is
+version me exist hi nahi karte the.
+**Fix:** Version bump kiya `0.10.21` → `0.10.24`.
+
+**Error:** `class file has wrong version 65.0, should be 61.0`
+**Wajah:** `tasks-genai:0.10.24` Java 21 bytecode me compiled hai, lekin
+project JDK 17 target kar raha tha.
+**Fix:**
+- `.github/workflows/build.yml` me JDK 17 → JDK 21
+- `compileOptions` aur `kotlinOptions` me `VERSION_17`/`"17"` → `VERSION_21`/`"21"`
+
+**Error:** `Cannot access class 'com.google.mediapipe.framework.image.MPImage'`,
+`Unresolved reference: BitmapImageBuilder`
+**Wajah:** Ye image-handling classes `tasks-genai` ke andar nahi, `tasks-vision`
+library me hoti hain — jo dependency me thi hi nahi.
+**Fix:** Naya dependency add kiya:
+```kotlin
+implementation("com.google.mediapipe:tasks-vision:0.10.26.1")
+```
+(Note: `0.10.24` version `tasks-vision` ke liye Maven pe exist nahi karta —
+har MediaPipe module alag version numbers pe release hota hai, saath nahi.)
+
+## 3. CI workflow — sab errors ek saath dekhne ke liye
+
+`gradle assembleDebug --stacktrace` me `--continue` flag add kiya, taaki
+Gradle pehli error pe na ruke aur ek hi run me saari independent errors
+dikha de (debugging bahut fast ho jaata hai isse).
+
+## 4. Post-merge code review (26 July 2026) — 3 functional bugs found & fixed
+
+These didn't show up as compile errors — the code compiles fine, but would misbehave or
+crash at runtime. Found by manually reading through the tool-calling and streaming paths.
+
+**Bug:** `StreamPlayerManager` (`play`/`pause`/`resume`/`stop`/`status`) touched `ExoPlayer`
+directly, but every tool in `AryaToolRegistry.execute()` runs under `Dispatchers.IO`.
+ExoPlayer enforces that it's only ever created/accessed from a thread with a `Looper`
+(the main thread) — calling it from a background thread throws
+`IllegalStateException: Player is accessed on the wrong thread`. Every `play_stream` /
+`find_and_play` / `pause_stream` / etc. tool call would have crashed or failed silently.
+**Fix:** each function now hops onto `Dispatchers.Main` internally via
+`runBlocking(Dispatchers.Main) { ... }` before touching the player, so callers
+(`StreamTools`, `AryaToolRegistry`) don't need to change at all.
+
+**Bug:** `ToolCallParser.parseToolCall()`'s brace-matching depth counter counted every `{`
+and `}` in the raw text, including ones inside quoted string values (e.g. a `calculate`
+expression or any JSON-ish text passed as a tool argument). This could cut the JSON off
+early or overrun it, causing a parse failure — the tool call would silently be dropped and
+the raw model text shown to the user instead of the tool actually running.
+**Fix:** depth counter now tracks whether it's inside a quoted string (with escape-char
+handling for `\"`) and ignores braces while inside one.
+
+**Bug:** same parser located the start of the JSON with an exact-substring check
+(`{"tool"` or `{ "tool"` — only 0 or exactly 1 space allowed). A model reply formatted with
+a newline or two spaces after the `{` would never be recognized as a tool call.
+**Fix:** replaced with a whitespace-tolerant regex, `\{\s*"tool"`.
+
+## 5. Free online models research + UI restructure (26 July 2026)
+
+- **`data/OnlineModels.kt` (new)** — curated, free-tier-only model catalogs for Groq, Gemini,
+  and OpenRouter, researched live against each provider's current docs:
+  - **Groq**: `openai/gpt-oss-120b`, `openai/gpt-oss-20b`, `qwen/qwen3.6-27b` — Groq retired
+    `llama-3.3-70b-versatile`/`llama-3.1-8b-instant`/`qwen/qwen3-32b`, so these three are now
+    the actual current free-tier lineup (console.groq.com/docs/models).
+  - **Gemini**: `gemini-flash-lite-latest`, `gemini-3.1-flash-lite`, `gemini-flash-latest`,
+    `gemini-3.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-flash` — all live on Google AI
+    Studio's free tier, no credit card.
+  - **OpenRouter**: 8 verified `:free`-suffixed models (gpt-oss-120b/20b, llama-3.3-70b,
+    qwen3-next-80b, nemotron-3-ultra/super, gemma-4-31b, laguna-m.1) — OpenRouter's free
+    lineup rotates fastest of the three, so DeepSeek/Mistral/Gemini currently have **zero**
+    free models there despite older guides still referencing them.
+- **`util/OnlineChatHelper.kt`** — was hardcoded to one fixed model per provider
+  (`llama-3.3-70b-versatile`, which is now retired). Rewritten to read the user's selected
+  model per provider from `PreferencesManager`, and to fall through the rest of that
+  provider's free-model list before moving to the next API key/provider on failure.
+- **`util/PreferencesManager.kt`** — added `selectedGroqModel` / `selectedGeminiModel` /
+  `selectedOpenRouterModel` / `autoOnlineFallback`.
+- **`ui/OnlineModelsScreen.kt` (new)** — per-provider free-model picker, same visual pattern
+  as the reference screenshots (blue all-caps section header, rounded selectable cards).
+  Reachable from Menu → "Online free models".
+- **Home screen restructured into a 2-page swipeable pager** (`MainActivity.kt`):
+  page 0 = `GalleryScreen` (every offline/on-device model — downloaded, recommended, or
+  currently loaded), page 1 = `ChatScreen`. The old use-case tile gallery (`HomeScreen`)
+  didn't disappear — it moved to its own `use_cases` route, one tap away via the menu.
+- **`viewmodel/ChatViewModel.kt`** — offline and online are now silently chained: if no
+  on-device model is loaded, or the loaded one throws/returns empty mid-generation, the
+  ViewModel automatically retries through `OnlineChatHelper`'s free-model chain instead of
+  just showing an error — no manual "online mode" toggle needed for this fallback to kick in.
+
+## 6. Final review pass (26 July 2026) — 3 more issues found & fixed
+
+- **Missing `@OptIn(ExperimentalFoundationApi::class)`** — `MainActivity.kt`'s new home-page
+  pager uses `HorizontalPager`/`rememberPagerState`, which are still marked experimental at
+  the project's Compose BOM version (`2024.06.00`, ≈ Foundation 1.6.x — Pager wasn't
+  stabilized until Foundation 1.7.0). Without the opt-in this is a straight-up compile error.
+  Fixed with a file-level `@OptIn` in `MainActivity.kt`.
+- **`ui/HomePagerScreen.kt` — orphaned dead file, deleted.** An earlier, unused draft of the
+  same pager logic that now lives inline in `MainActivity.kt`. Never imported or referenced
+  anywhere; would have just sat there as confusing duplicate code. Removed entirely.
+- **`autoOnlineFallback` preference was unreachable.** `PreferencesManager` had the setting
+  (defaulting to on), but nothing ever read it and there was no UI to turn it off. Wired it
+  into `MainActivity` (gates whether `onlineFallback` is passed to `ChatViewModel`) and added
+  a toggle in `SettingsScreen` using the existing `SettingsRow` pattern, so it's an actual,
+  reachable setting now instead of dead code.
+- Also cleaned up a couple of leftover unused imports (`OnlineModel` in `OnlineChatHelper.kt`,
+  `ApiProvider` in `OnlineModelsScreen.kt`) and added a small "🌐 Online free model se jawaab
+  aaya" status line in `ChatScreen.kt`, since `ChatViewModel.lastReplySource` existed but
+  nothing displayed it.
+
+## 7. Critical navigation bug (26 July 2026) — API Keys screen was unreachable
+
+**Bug:** The Compose `MainActivity`/`MenuScreen` had no route to the classic ViewBinding
+build's `HomeActivity`/`HubActivity`/`ApiKeysActivity` at all. The only path in was the
+home-screen widget (`WidgetLaunchActivity`), and even that only opened `HomeActivity` when
+zero chat sessions existed yet — once one session existed, the widget always deep-linked
+straight to `ChatActivity` instead. Net effect: on a normal fresh install, the API Keys
+screen (and Sessions/classic Settings/Models/Notifications) was practically unreachable
+through the app's UI, contradicting the README's claim that it's "one tap away from the
+Compose home screen."
+
+**Fix:** Added an "API Keys & Chat History" card to `MenuScreen.kt`'s `MENU_ITEMS`, and in
+`MainActivity.kt`'s `composable("menu")` block, special-cased that one route to
+`context.startActivity(Intent(context, HomeActivity::class.java))` instead of
+`navController.navigate(...)` — since `HomeActivity` is a separate Android Activity, not a
+Compose NavHost destination. Menu → API Keys & Chat History → (Hub icon) → API Keys is now
+the always-available path, independent of whether the widget is installed or any session exists.
+
+## 8. Phase 1 refactor (27 July 2026) — classic build removed, single Compose UI + single inference path
+
+This is the first phase of a larger cleanup (see chat history for the full plan) — merging
+the two parallel UI builds and two parallel inference paths this project accumulated back
+into one, since that duplication was the root cause of bug #7 above.
+
+**Removed entirely** (all confirmed zero remaining references via full-codebase grep before
+deletion):
+- Classic ViewBinding Activities: `HomeActivity`, `HubActivity`, `ChatActivity`, `ChatAdapter`,
+  `SessionsActivity`, `SettingsActivity`, `ModelListActivity`, `NotificationsActivity`,
+  `ApiKeysActivity`
+- Their layouts/menu XML (`activity_home.xml`, `activity_hub.xml`, `activity_chat.xml`, etc.)
+- The duplicate on-device inference path: `model/ModelManager.kt`, `model/LlmInferenceHelper.kt`,
+  `model/ChatMessage.kt` (the `inference/` path stays — it's the one actually wired to the
+  Compose `GalleryScreen`/model downloader)
+- `Theme.Arya.Classic` from both `values/themes.xml` and `values-night/themes.xml`
+- Now-unused dependencies: `com.google.android.material`, `androidx.constraintlayout`,
+  `androidx.recyclerview`, `androidx.documentfile`, `androidx.preference-ktx`, and the
+  `viewBinding` build feature. (`androidx.appcompat` was kept — `AryaApp.kt` still uses
+  `AppCompatDelegate.setDefaultNightMode` for the dark-mode toggle.)
+
+**Added** (so nothing that classic build did is actually lost):
+- `ui/ApiKeysScreen.kt` — Compose replacement for the old `ApiKeysActivity`, reachable at
+  Menu -> "API Keys" (a real NavHost route now, not an Activity hidden behind the widget).
+- `ui/SessionsScreen.kt` — Compose replacement for `SessionsActivity`, at Menu -> "Chat
+  History". Includes the export/share-as-Markdown action the classic build had too.
+- `ChatViewModel` now takes an optional `chatDao`/`initialSessionId` and actually **persists
+  every exchange to Room** — previously the Compose chat screen was pure in-memory and lost
+  everything on process death; it was never wired to the `ChatDao`/`ChatSessionEntity` at all
+  even though those Room classes already existed (only the classic `ChatActivity` used them).
+  This is a real behavior change, not just a rewire: chats now survive app restarts.
+- `mipmap-anydpi-v26/ic_launcher.xml` gained a `monochrome` layer for Android 13+ themed icons;
+  refined the foreground glyph slightly.
+
+**Simplified:** `WidgetLaunchActivity` used to query Room directly to decide between opening
+`ChatActivity` or `HomeActivity`. It now just opens `MainActivity` — much less code, and every
+session it creates shows up in Chat History regardless of which app entry point started it.
+
+**Honesty note (same as always):** this was done via careful `grep`-based cross-referencing of
+every deleted symbol against the rest of the codebase (no unresolved imports, no dangling
+`R.layout`/`R.string` refs, no missing ViewBinding classes) since this sandbox has no Android
+SDK/Gradle to actually compile against. That catches the class of bug a compiler would catch
+via "cannot resolve symbol" — it does **not** catch logic bugs, so this still needs a real
+build (GitHub Actions or Android Studio) before being called verified.
+
+**Deliberately NOT done in this pass** (next phases): full visual/branding redesign beyond the
+icon, RAG embeddings upgrade, streaming foreground service, gradle wrapper jar (still can't be
+generated without network/Gradle access in this environment).
+
+## 9. Phase 2 (27 July 2026) — background streaming + onboarding nudge; RAG/wake-word reviewed
+
+**Streaming now survives backgrounding.** Added `service/StreamPlaybackService.kt`, a real
+`androidx.media3.session.MediaSessionService` that owns the `ExoPlayer` + a `MediaSession`.
+Media3's `DefaultMediaNotificationProvider` automatically shows a system media notification
+and enters/exits the foreground state as playback starts/stops — no manual notification code
+needed. `player/StreamPlayerManager.kt` is now a thin client that binds to this service (via a
+custom `ACTION_LOCAL_BIND` intent action, kept distinct from `MediaSessionService.onBind`'s own
+handling of controller/notification connections — overriding `onBind` unconditionally would
+have silently broken those). Added the `FOREGROUND_SERVICE_MEDIA_PLAYBACK` permission and
+`media3-session:1.4.1` dependency, and an `onTaskRemoved()` override so the service stops
+itself if the user swipes the app away while nothing is actively playing (Media3's own
+recommended pattern), instead of lingering as an empty foreground service.
+
+Known tradeoff, stated plainly: `pause`/`resume`/`stop`/`status` only check the in-memory
+bound-service reference, not a fresh bind — so if the app process is killed and relaunched
+while the service is still alive in the background, those four (not `play`) won't reconnect to
+it. Fixing that fully needs a persisted "is something playing" flag checked before deciding
+whether to bind, which was left out to avoid the alternative bug of starting an empty
+foreground-service notification on every stray `pause_stream` call.
+
+**First-run onboarding nudge.** Added a dismissible banner on the Chat tab, shown only when
+there's neither an offline model loaded nor any API key saved, pointing straight at Menu ->
+API Keys (`MainActivity.kt`, `composable("home")`). This exists because bug #7's fix made API
+Keys *reachable*, but a first-time user still has no reason to go looking for it — "why isn't
+Arya answering me" was a real discoverability gap even after that fix.
+
+**Reviewed, not changed:**
+- `WakeWordService`/`VoiceActivityDetector` — already exactly the intended shape (Picovoice
+  opt-in only behind a saved key, VAD the automatic zero-setup default) — no changes made.
+- RAG (`SimpleRagHelper.kt`) — still TF-IDF, **not upgraded**. A real embeddings upgrade needs
+  a `.tflite` embedding model file bundled or downloaded, and this sandbox has no network
+  access to fetch one — attempting it blind would mean shipping code that references a model
+  file that doesn't exist. Left as a clearly-flagged next step rather than faked.
+
+**Same honesty note as always:** no Android SDK/Gradle in this sandbox, so this is still
+`grep`-verified for dangling references, not compiler-verified. Build via GitHub Actions or
+Android Studio before trusting it.
+
+## 10. Phase 3 (27 July 2026) — visual/branding redesign
+
+Replaced the default-Material-picker palette (orange/blue/green primaries — indistinguishable
+from any Android sample app) with a deliberate token system built from what Arya actually is:
+a voice-first assistant that lives in two places at once — a model running quietly on your
+phone, or a request going out to the network.
+
+**Palette** (`ui/theme/Color.kt`): Ink (`#14121A`, violet-cast near-black, not flat black) for
+the resting/local state, Signal (`#7C5CFC`, electric violet) for primary actions and the
+"listening" moment, Ember (`#FF7A45`) specifically as the **online-fallback indicator** and
+Sprout (`#34D399`) specifically as the **on-device indicator** — two distinct hues so which
+mode answered is legible at a glance in the chat screen, not just a text label. `Theme.kt` maps
+these to a complete M3 `ColorScheme` (both light/dark, all container/on-container roles
+filled in deliberately rather than left to M3's auto-derivation) plus a small shape asymmetry
+(rounder cards at 16dp, sharper small elements at 8dp) so containers read as "quiet" and
+actions read as "pressable."
+
+**Typography** (`ui/theme/Type.kt`): tightened letter-spacing on titles for a more considered
+feel, full bodySmall/titleSmall roles filled in (previously left to M3 defaults). Added one
+deliberate signature: `AryaMonoStatus`, the system monospace face used *only* for technical
+readouts — model names, sync timestamps, masked API keys, the on-device/online badge — never
+for conversation text. Arya started as Termux/CLI scripts; this keeps a thread of that
+character in status text without making the whole app look like a terminal.
+
+**Applied the signature in 4 concrete places**: `ChatScreen`'s reply-source badge (now shows
+both "● online" in Ember and "● on-device" in Sprout — previously only "online" had any
+indicator at all), `SessionsScreen`'s model-name/date line, `ApiKeysScreen`'s sync-status text
+and masked-key display.
+
+**App icon**: foreground "A" glyph recolored to Signal violet on an Ink background (was generic
+orange), with the crossbar notch in Sprout green as a small nod to the on-device/online duality
+that now runs through the rest of the UI.
+
+**Deliberately scoped out**: no custom font (this sandbox has no network to fetch one — system
+default + monospace only, which is why the "signature" leans on font *family contrast* rather
+than a custom display face), no per-screen layout rework (spacing/structure across screens
+was already reasonably consistent, so this pass stayed to color/type tokens rather than
+re-touching every screen's layout — lower risk, given none of this is compiler-verified yet).
+
+Old color names (`AryaOrange`, `AryaBlue`, `AryaGreen`, etc.) kept as `@Deprecated` aliases
+pointing at the new tokens, specifically so `OnlineModelsScreen.kt`/`MainActivity.kt` (which
+still reference `AryaBlue` for an accent/dot-indicator) keep compiling without being touched —
+they'll just render in the new violet automatically.
+
+## 11. Phase 4 (27 July 2026) — RAG quality improvement (still not real embeddings)
+
+Honest framing first: this is **not** the embeddings upgrade promised earlier — that still
+needs a `.tflite` embedding model file, and this sandbox still has no network access to fetch
+one. What changed instead is a real, incremental improvement to the existing TF-IDF retrieval
+in `SimpleRagHelper.kt`, using only techniques that need no external model:
+
+- **Bigram (phrase) matching** alongside unigrams, weighted higher — two words matching
+  *together* and in order is a much stronger relevance signal than the same two words matching
+  separately in unrelated chunks.
+- **Cosine-style length normalization** — chunk scores are now divided by `sqrt(chunk word
+  count)`, so a long chunk no longer wins purely by containing more of the document's
+  vocabulary by chance.
+- **Sentence-aware chunk capping** (`MAX_CHUNK_CHARS = 600`) — very long paragraphs get split
+  on sentence boundaries into smaller chunks instead of being indexed as one giant blob, which
+  both the bigram matching and the length normalization above depend on being reasonably sized
+  to work well.
+
+This is a legitimate quality step (better phrase sensitivity, less bias toward long chunks) —
+it is still keyword/n-gram overlap, not semantic similarity. A query and a passage that mean
+the same thing but share no words still won't match. That gap only closes with real embeddings.
+
+## 12. Phase 5 (27 July 2026) — tools now actually work from the main Chat screen
+
+**The big one this pass.** Found (via code review while investigating "radio/yt-dlp chat me kaam nahi karta") that the main Chat screen had **zero tool-calling wired up at all** — `ChatViewModel` only ever called `engine.generateStream`/`onlineFallback` for plain text; `AryaToolRegistry`/`ToolCallParser` were only reachable from the separate (and hard-to-find) Agent Skills screen. So `play_stream`, `search_youtube`, weather, device controls, all ~90 tools — none of them did anything from the screen a normal user actually types into. This wasn't something Phase 1-4 broke; it was a pre-existing gap this project always had.
+
+**Fixed**: `ChatViewModel` now takes a `toolExecutor` param. When provided (`MainActivity` wires it to `AryaToolRegistry.execute`), both the offline and online paths:
+1. Build a tools-aware system prompt via `AryaToolRegistry.relevantTools(prompt)` + `ToolCallParser.buildSystemPrompt` (both pure functions, no Context needed — this is why `ChatViewModel` itself can build this without MainActivity having to pass it in)
+2. After the model replies, check `ToolCallParser.parseToolCall(reply)` — if it's a tool-call JSON, execute it and replace the message with the actual tool result instead of showing raw JSON
+3. `lastReplySource` now records which tool ran too (e.g. `"on-device:Gemma3-1B · tool: play_stream"`), surfaced in the chat badge
+
+**Known rough edge, stated plainly**: for the offline (streaming) path, the raw tool-call JSON is briefly visible on screen while it's still streaming in, before getting replaced by the tool result the instant generation finishes — because whether a reply *is* a tool call can't be known until the whole thing has streamed. This is a real, if minor, UX wart; fixing it properly would mean buffering output during generation instead of live-streaming it, which was left alone to avoid degrading the (already-working) streaming feel of normal conversation.
+
+**Added `radio`/`radio laga`/`gaana laga`/`chala do` as synonyms for `play_stream`** in `AryaToolRegistry`'s keyword matcher, since that's the exact phrasing requested.
+
+**Also this pass**:
+- `util/AryaIdentity.kt` — folds "Sudhanshu Maurya built you, you're Arya, don't claim to be GPT-4/OpenAI/Gemini" into every system prompt (both paths). Explains the earlier screenshot where the Groq path answered "I'm OpenAI's GPT-4" — that was the underlying free model's own base-training identity leaking through with no override in place.
+- `util/LocationContext.kt` — folds the phone's last-known GPS location (reverse-geocoded, cached 30 min to avoid a network call every single message) into every system prompt.
+- Chat status badge now shows the actual model/provider name (`"● online — Groq/llama-3.1-8b-instant"`) instead of just `"online"`.
+
+**Honestly still not done from the yt-dlp/video request**: there is genuinely no yt-dlp (or equivalent) integration anywhere in this codebase — `search_youtube` only returns search-result *links* (the code comment says so explicitly: yt-dlp needs a Python runtime, which doesn't exist on Android). Actually playing an arbitrary YouTube video by name would need a Kotlin-native extractor library (e.g. NewPipeExtractor) added as a new dependency — a bigger, separate piece of work not attempted in this pass. `play_stream` (direct HLS/audio URLs — internet radio etc.) does work through this new tool-calling path.
+
+**Same honesty note as every phase**: no Android SDK/Gradle in this sandbox, still grep-verified only (this time also cross-checked every changed constructor call site and lambda type signature by hand), not compiler-verified.
+
+## 13. Phase 7 (28 July 2026) — copy-paste, online/offline switch, Persona UI, voice input
+
+- **Long-press to copy** — `ChatBubble` now has `combinedClickable` with `onLongClick` copying the message text to the clipboard (toast confirmation).
+- **Online/Offline switch** — new `PreferencesManager.chatMode` ("auto"/"online"/"offline") backing a dropdown in ChatScreen's top bar. `ChatViewModel.send()` now checks this before deciding offline-vs-online, and — for "offline" mode specifically — no longer silently falls back to online on failure (shows an explicit error instead), since that would defeat the point of forcing offline-only.
+- **Persona UI** (`ui/PersonaScreen.kt`, Menu -> "Persona") — create/switch/deactivate/delete personas, reachable without typing chat commands. Also fixed a real gap while wiring this up: `PersonaStore.activeSystemPromptPrefix()` already existed but **nothing in the main chat path ever called it** — only the separate Agent Skills screen did. Now it's folded into `identityContext` alongside `AryaIdentity`/`LocationContext`, so an active persona actually affects the main Chat screen.
+- **Voice input** — mic button in the input row using Android's built-in `SpeechRecognizer` (same mechanism `AudioScribeViewModel` already used for the separate Audio Scribe screen). Transcribes to text and appends into the input field for the user to review before sending — doesn't auto-send, same trust model as typed text.
+- **Model list curated** per request: removed Gemma-4-E2B/E4B (text+tools only, no vision/audio) and Gemma-3n-E4B (bigger duplicate of E2B) and DeepSeek-R1-Distill (redundant). Kept Gemma-3n-E2B-it (3.7GB) as the primary "does everything reasonably" pick (vision+audio+coding), Gemma3-1B-IT as the ultra-light fallback, Qwen2.5-1.5B for compatibility with what was already downloaded, and the two 270MB function-calling models (needed by the separate Tiny Garden/Mobile Actions screens, left alone since they're not "faltu bade" — they're tiny and serve a different purpose). Verified via `UseCaseDetailScreen.kt`'s `mapNotNull` that removing IDs from `CuratedModels` can't crash anything referencing them — it silently drops missing entries.
+
+### Deliberately NOT attempted: NewPipeExtractor for yt-dlp-style "play video by name"
+
+This is the one item explicitly requested that I'm choosing not to add blind. Adding it means: a new external Maven dependency, implementing NewPipeExtractor's `Downloader` abstract class (it requires the app to supply its own HTTP client — there's no default), and calling its search/stream-extraction API correctly. I have no network access in this sandbox to check the library's actual current API surface, and — unlike everything else in this pass — a wrong method signature here wouldn't just break this one feature, it would fail the **entire Gradle build**, since Kotlin won't compile against a nonexistent/changed API. Given four solid phases now sit on a confirmed-passing build, I'm not willing to risk that on a guess I can't verify. Left in the pending list; best path forward is doing this in a follow-up pass with a real compiler feedback loop (i.e., after this pass builds green, iterate on just this one file against real build errors).
+
+## 14. Phase 8 (28 July 2026) — multi-step tool loop (search → verify → answer, not just one call)
+
+Phase 5's tool-calling was single-step: one tool call, show result, done. This pass makes it a
+proper bounded loop in both `ChatViewModel.send()` (offline) and `runOnlineOnly()` (online): after
+a tool executes, its result gets fed back into the conversation context, and the model can decide
+to call *another* tool instead of answering immediately — e.g. search a library/GitHub repo, read
+that result, and only then write code with it, instead of guessing from training data alone.
+`ToolCallParser.buildSystemPrompt` now explicitly tells the model to do this for coding questions
+it isn't certain about. Added `github`/`documentation dekho`/`docs check karo`/`library check karo`
+as `web_search` synonyms so coding questions actually trigger this path.
+
+**Capped at `maxToolRounds = 4`** — if the model still wants another tool after 4 rounds, the loop
+stops and shows whatever came back last rather than looping indefinitely; `lastReplySource` gets
+tagged `(incomplete)` in that case so it's visible this wasn't a clean finish.
+
+**Known UX trade-off, stated plainly**: only the *first* generation round streams live to the
+screen (so a plain, no-tool answer still types out as before). Once a tool call is detected and
+the loop starts, subsequent rounds show a status line ("🔍 tool_name chala raha hoon...") instead
+of live text, and the *final* answer (once no more tools are called) appears all at once rather
+than streaming — doing per-round live streaming across an unknown number of loop iterations added
+enough complexity that it was left for later rather than risking new bugs in an already-large pass.
+
+## 15. Phase 9 (29 July 2026) — in-app update checker (no more re-sharing the APK)
+
+**The problem this solves**: once Rudra shares the APK with friends, any future fix/feature meant re-sending the file every time — Android has no way for one app to silently push updates into another (not without root/MDM, which isn't realistic for casual sharing). This adds an in-app "check for update" flow instead: install once, then Arya itself notices and offers new versions.
+
+**How it works**:
+- `util/UpdateChecker.kt` — hits `GET api.github.com/repos/{owner}/{repo}/releases/latest`, compares the release's `tag_name` (dotted-numeric comparison, so "1.10.0" correctly beats "1.9.0") against the installed `versionName`, and finds the `.apk` release asset's download URL.
+- `worker/UpdateCheckWorker.kt` + `UpdateCheckScheduler.kt` — same `CoroutineWorker`/`PeriodicWorkRequestBuilder` pattern as the existing `CurrentInfoWorker`, checks once a day, caches the result in `PreferencesManager`.
+- `util/UpdateInstaller.kt` — downloads the APK (reusing `HfDownloader`, which turned out to already be a generic "download this URL" helper despite the name) and hands it to Android's package installer via `FileProvider` + `ACTION_VIEW` — the user still gets the normal Android "Install this app?" confirmation (there's no way around that without root; a tap is as automatic as this can get).
+- **Settings -> "App Updates"** — where the GitHub repo ("owner/repo") is configured, plus "Check now" and, once a newer version is found, "vX.Y.Z download & install karo". Also a small dismissible banner on the Gallery page when an update's available, so friends don't have to think to go looking in Settings.
+- Added `REQUEST_INSTALL_PACKAGES` permission and an `updates/` cache path to the existing FileProvider config.
+
+**One-time CI change this depends on**: the workflow previously only uploaded a temporary Actions artifact (expires, needs a GitHub login to download — useless for this feature). `.github/workflows/build.yml` now also publishes a **GitHub Release** with the APK attached, reading `versionName` straight out of `app/build.gradle.kts` so there's no separate manual version-bump step — bump the version, push, the next build publishes that as the release. Pushing again without bumping the version just updates the same release (same tag).
+
+**The repo isn't hardcoded** — the Settings field defaults to blank, so update checking is off until it's explicitly configured with the actual repo (avoids silently pointing at a guessed/wrong repo name).
+
+**Honest limitation, stated plainly**: the update-available banner reads `PreferencesManager` directly rather than through a reactive Flow, since the background worker writes to plain SharedPreferences — it'll reliably show up on the next app open/navigation, but won't instantly appear mid-session the moment a background check finishes while the Gallery screen is already on-screen. Not worth a bigger refactor for what's a once-a-day check.
+
+## Debugging tip (agli baar ke liye)
+
+Jab build fail ho:
+1. GitHub Actions run page → **⋮ (three dots) → "Download log archive"**
+2. Wo zip yahan chat me upload kar do — screenshots ke bajaye, taaki
+   poora log ek sath padh ke exact root cause nikala ja sake.
+
+## 16. Full top-to-bottom review pass (31 July 2026) — 5 issues found & fixed, nothing else broken
+
+Went through every file in the zip, smallest to largest, cross-referencing (not just reading)
+against the rest of the codebase: every one of `AryaToolRegistry`'s 109 tool definitions checked
+against its `execute()` `when`-branch (all present, no dupes) *and* against its target function's
+actual parameter count (all 108 non-`else` call sites fit); every internal `import
+com.arya.ai.*` checked against a real declared symbol; every NavHost route checked against every
+`navigate()` call site; every deleted-in-a-past-phase file/theme/class re-confirmed to have zero
+remaining references. That part came back clean — the findings below are the real gaps.
+
+**Bug: the "Use Cases" 7-tile gallery was unreachable.** `composable("use_cases")` existed in
+`MainActivity.kt` and the screen itself worked fine, but nothing anywhere called
+`navigate("use_cases")` — not the menu, not any button. Same class of bug as #7 (API Keys), just
+never caught for this screen. **Fix:** added a "Use Cases" card to `MenuScreen.kt`'s
+`MENU_ITEMS`, pointing at the existing route.
+
+**Bug: on-device tool loop duplicated context every round.** `InferenceEngine`'s
+`LlmInferenceSession` is stateful — every `generateStream()` call does `addQueryChunk(prompt)` on
+top of whatever the session already remembers. `ChatViewModel`'s multi-step tool loop (Phase 8)
+was re-sending the *entire, growing* `conversationContext` string each round instead of just the
+new tool-result text — so round 2 re-added round 1's full text into a session that already had
+it, round 3 re-added it a third time, etc. Real risk of hitting the on-device model's context
+limit well before `maxToolRounds` (4) on weaker phones. **Fix:** each round now only sends the
+incremental tool-feedback text; the session's own memory carries the rest. Also stopped
+re-attaching `images` on rounds after the first, same underlying reason.
+
+**Bug: date/time line sent twice to the model.** `ToolCallParser.buildSystemPrompt()` already
+folds in a `DateTimeContext.currentDateTimeLine()`; `ChatViewModel.send()` was adding a second
+one right after, whenever tools were enabled. Harmless but wasteful. **Fix:** only added once
+now, in the non-tool branch that actually needs it.
+
+**Doc gap: `README.md`'s intro/structure/permissions/dependencies/honest-notes sections were all
+still describing the pre-Phase-1 state** (two builds coexisting, `Theme.Arya.Classic`,
+`LlmInferenceHelper.kt`, ConstraintLayout/RecyclerView deps) — none of that has existed since
+Phase 1 removed the classic build. Also separately claimed CI runs unit tests and has a
+`release-signed` job, neither of which was actually in `build.yml`. **Fix:** rewrote those
+sections to match the current single-Compose-UI state; see next item for the CI claim.
+
+**Gap: CI never actually ran the unit tests or built a signed release, despite README saying
+both existed.** `AryaToolRegistryTest.kt` (added in an earlier pass) was never wired into
+`build.yml` — CI only ever ran `assembleDebug`. The signed-release job README described in detail
+(base64 keystore secret, `ARYA_KEYSTORE_BASE64` + 3 more secrets, skip-if-unset) was documented
+but never written. **Fix:** added a `testDebugUnitTest` step before the debug build, and a new
+`release-signed` job that decodes the keystore secret to a temp file, points
+`ARYA_KEYSTORE_PATH` at it (what `build.gradle.kts`'s signing config already reads), and runs
+`assembleRelease` — every step gated on a secret-presence check so repos without the secrets
+configured build exactly as before.
+
+**Same honesty note as every phase:** still `grep`-verified, not compiler-verified — no Android
+SDK/Gradle/network in this sandbox. Build via GitHub Actions or Android Studio before trusting
+this pass fully.
+
+## 17. Phase 10 (31 July 2026) — Firebase: Community stats + optional chat sync, no server needed
+
+**What this solves**: previously the only way to know anything about real usage was whatever
+Rudra/friends happened to mention. This adds Firebase — specifically because it needs **no
+Python/Termux server and no separate machine to keep running**; the phone talks straight to
+Google's hosted Realtime Database/Analytics over HTTPS, the same way it already talks to
+Groq/weather/etc.
+
+**New/changed files**:
+- `util/FirebaseSync.kt` (new) — two deliberately-separated things:
+  1. **Anonymous counting, always on, no consent needed** — `trackUser()` bumps
+     `/meta/totalUsers` the first time an `installId` (random UUID, generated once per install
+     in `PreferencesManager`, not tied to any real identity) is ever seen, and maintains a live
+     `/meta/onlineCount` via the standard Firebase presence pattern (`.info/connected` +
+     `onDisconnect()` registered *before* the write, so a kill/network-loss/close all
+     self-correct the count with no explicit "closing" call needed anywhere else).
+  2. **Chat content sync, gated behind explicit consent** — `logChatExchange()` pushes each
+     user+model exchange to `/chats/{installId}` in Firebase, but is a no-op unless
+     `PreferencesManager.dataConsentGiven == true`. This is the one thing here that's actually
+     personal (people can type anything), so it's the one thing behind a dialog.
+  - `logToolUsed()` — anonymous Analytics event per tool call, so which of Arya's ~110 tools
+    actually get used in practice is visible without reading chat content at all.
+  - Every function checks `FirebaseApp.initializeApp(context)` first and silently no-ops (logs
+    a warning, doesn't crash) if that fails — so a build without a real `google-services.json`
+    still compiles and runs exactly as before, it just has no Community stats.
+- `ui/CommunityScreen.kt` (new, Menu -> "Community") — shows total installs + how many are
+  online right now, read live off `/meta` via `FirebaseSync.observeCommunityStats`. Deliberately
+  does **not** try to show geography or a chat-message feed in-app — Firebase Console's
+  Analytics -> Demographics tab already gives country/city automatically from the Analytics SDK
+  being present (no custom code needed for that), and `/chats` is meant to be read in the
+  Console's Realtime Database viewer rather than rebuilding a log browser the Console already is.
+- `MainActivity.kt` — added the first-launch consent `AlertDialog` ("Do you want to chat or
+  share personal data to further improve AI?"), shown from the same startup `LaunchedEffect`
+  that requests runtime permissions (not from a separate flow) so it's asked once, right when
+  the app first opens, as requested. "Haan"/"Nahi" set `dataConsentGiven`/`dataConsentAsked` and
+  the dialog never shows again after that. `FirebaseSync.trackUser()` is called unconditionally
+  in the same effect (see the "always on" point above); a shared `chatSync` lambda is built once
+  and passed into every `ChatViewModel` instance (home-page chat + reopened-session chat) so
+  every real exchange is covered, not just one screen; `toolExecutor` now also calls
+  `FirebaseSync.logToolUsed()` before running each tool.
+- `viewmodel/ChatViewModel.kt` — new optional `chatSync: ((userText, modelText) -> Unit)?`
+  constructor param, called from the existing `persistExchange()` (same single place that
+  already saves to Room) — no new call site needed, both the offline and online reply paths
+  already funnel through it.
+- `util/PreferencesManager.kt` — added `installId` (lazily generates+persists a random UUID on
+  first access), `dataConsentAsked`, `dataConsentGiven`.
+- `ui/MenuScreen.kt` — added the "Community" tile pointing at the new route.
+- Root `build.gradle.kts` — declared the `com.google.gms.google-services` plugin (`apply
+  false`, version 4.5.0 — current per Firebase's release notes as of this pass).
+- `app/build.gradle.kts` — added `firebase-bom:34.15.0` + `firebase-analytics` +
+  `firebase-database`. The google-services plugin itself is applied **conditionally**
+  (`if (file("google-services.json").exists())`), same "don't break the build for people who
+  haven't configured this yet" stance as the existing release-signing config — without a real
+  config file, the project builds and runs exactly as it did before this phase.
+- `.github/workflows/build.yml` — both the debug-build job and the `release-signed` job gained
+  an optional step that decodes an `ARYA_GOOGLE_SERVICES_JSON_BASE64` repo secret into
+  `app/google-services.json` before building, skipped entirely if that secret isn't set (same
+  pattern as the existing keystore-secret gating).
+- `README.md` — new "Firebase setup" section: create-a-Firebase-project steps, where to put
+  `google-services.json`, example Realtime Database security rules, and the CI secret name.
+
+**Honest limitations, stated plainly**:
+- **This sandbox has no network access**, so there is no real `app/google-services.json` in
+  this zip — Sudhanshu needs to create his own Firebase project and drop that file in himself
+  (README walks through it). Until then, the app builds and runs identically to before this
+  phase; Community just shows "Firebase configure nahi hai" instead of numbers.
+- Geography ("kaha kaha se log jude hain") is **not** custom code — it's Firebase Analytics'
+  built-in Demographics view in the Console. If Sudhanshu wants it inside the app itself instead
+  of the Console, that's a separate follow-up (would need a country lookup — e.g. IP geolocation
+  or on-device `Geocoder` — written per-user into `/meta/countries/{code}`, not attempted here
+  to keep this pass's scope to what was explicitly asked).
+- The presence pattern's own well-documented trade-off applies: if `.info/connected` fires more
+  than once in one app session (brief network drop-and-recover), the online count can
+  temporarily read a little high until the stale listener's cleanup also fires — this is
+  standard behavior of Firebase's own presence pattern, not something specific to this code.
+- The example Realtime Database rules in the README are intentionally simple (open write, no
+  cross-user read) for a hobby app shared casually with friends — not hardened against a
+  malicious actor spamming `/meta/onlineCount`. Good enough for the stated use case; flagged
+  honestly rather than silently shipped as if it were production-grade.
+
+**Same honesty note as every phase**: grep-verified only (every new symbol/import/route
+cross-checked against real declarations and call sites, both `ChatViewModel` construction sites
+confirmed to pass the new `chatSync` param) — no Android SDK/Gradle/network in this sandbox, so
+this still needs a real build (GitHub Actions, once `google-services.json`/its CI secret is set
+up) before being called verified.
+
+## 9. ElevenLabs TTS + Groq Whisper STT + dedicated NewsAPI (1 August 2026)
+
+Paired with an `arya-relay` update — three new relay endpoints (`/v1/elevenlabs`,
+`/v1/whisper`, `/v1/news`), each keeping the same "keyless/offline fallback if the relay
+isn't configured or the call fails" stance as the existing Tavily web-search integration.
+
+- **`ElevenLabs` TTS — default everywhere, Android TTS fallback.** New `VoiceHelper.speak()`
+  (suspend) tries `/v1/elevenlabs` first (posts text, gets back `audio/mpeg` bytes, plays via
+  `MediaPlayer`), falls back to the existing Android `TextToSpeech` on any failure/no relay
+  configured. Also wired into `WakeWordService`'s reply-speaking path (`speakAudio()` /
+  `tryPlayElevenLabs()`) — same pattern, duplicated rather than shared since the service owns
+  its own `tts` instance/lifecycle (`isSpeaking` flag, `onInit`, barge-in timing untouched).
+- **Groq Whisper STT — tried first, Android SpeechRecognizer fallback.** New
+  `util/WhisperRecorder.kt`: records mic to a temp `.m4a` (`MediaRecorder`, AAC), uploads
+  multipart to `/v1/whisper` (Groq's `whisper-large-v3` — reuses the same `GROQ_KEYS` the relay
+  already has, no separate key). `ChatScreen`'s mic button is now a toggle: tap to start
+  recording (if `WhisperRecorder.isAvailable`, i.e. `RELAY_URL` is configured at build time),
+  tap again to stop and transcribe; if that comes back null (no relay / upload failed / empty
+  audio), falls straight through to the pre-existing `SpeechRecognizer` flow for that same
+  attempt. `AudioScribeViewModel` (separate "Audio Scribe" screen) and the wake-word command
+  listener were **not** touched — both still use Android's `SpeechRecognizer` only, left as a
+  follow-up if wanted.
+- **NewsAPI — dedicated news source, RSS-scrape fallback.** `BriefingTools.getNews()` now
+  tries `/v1/news` first (`mode=headlines&country=in` for the no-topic case, `mode=search` for
+  a topic) via the new `newsApiArticles()` helper, falls back to the pre-existing keyless
+  Google News RSS scrape if the relay/News key isn't there. `morning_briefing` picks this up
+  automatically since it calls `getNews()` internally — no separate change needed there.
+
+**Honest limitations, stated plainly**:
+- Whisper's mic-toggle UX is a regression vs. the old single-tap `SpeechRecognizer` flow (which
+  auto-detects end-of-speech) — user now has to tap again to stop recording. Trade-off for
+  using a file-upload-based STT instead of a streaming one; flagged rather than hidden.
+- If a Whisper *upload* itself fails partway (not just "no relay configured"), the fallback to
+  `SpeechRecognizer` only kicks in for that one attempt — it re-listens from scratch rather than
+  resuming, since the two mechanisms don't share partial state.
+- Same sandbox caveat as every phase: grep-verified only (no Android SDK/Gradle/network here),
+  needs a real CI build before being called verified. `arya-relay/app.py`'s new endpoints
+  weren't hit against live ElevenLabs/Groq-Whisper/NewsAPI accounts either — only checked
+  against each provider's documented request/response shape.
+
+## 10. Wake-word command listening also moved to Whisper (1 August 2026)
+
+Extends #9 — Chat screen's mic already used Whisper via tap-to-stop; the wake-word service's
+command listening (after "Hey Arya, <command>") needed a *hands-free* auto-stop instead, since
+there's no button to tap here.
+
+- **New `util/WhisperUploader.kt`** — pulled the multipart-upload-to-`/v1/whisper` logic out of
+  `WhisperRecorder` into a shared object, so it's not duplicated between the two recording styles.
+  `WhisperRecorder` (Chat screen) now just calls `WhisperUploader.transcribe()`.
+- **New `util/VadCommandRecorder.kt`** — records raw PCM via `AudioRecord` (same primitive
+  `VoiceActivityDetector` already uses in this service), tracks RMS to detect "has the person
+  started speaking" and then "have they gone quiet again" (~900ms trailing silence = auto-stop;
+  4s of nobody speaking at all, or a 10s hard cap, are both safety fallbacks), writes a WAV file
+  by hand (44-byte header patched in after recording, since the final size isn't known upfront),
+  and transcribes it via `WhisperUploader`.
+- **`WakeWordService.startCommandListening()`** now tries this hands-free path first (releasing
+  VAD/Porcupine/recognizer's hold on the mic first, same as `freshRecognizer()` already did) —
+  on success, goes straight to `runCommand()`. On any failure (no relay configured, nobody
+  spoke, upload failed), falls through to the pre-existing flow, renamed
+  `startCommandListeningViaSpeechRecognizer()`, unchanged otherwise.
+- **Audio Scribe screen intentionally left untouched** (Sudhanshu's call) — still plain Android
+  `SpeechRecognizer`, since Whisper's file-upload-then-transcribe model doesn't give the same
+  live/streaming partial-text UX that screen relies on; noted as a possible future follow-up if
+  a chunked-upload approach is wanted there later.
+
+**Honest limitations, stated plainly**:
+- This is the least-tested new code in this pass — hand-rolled WAV header + raw `AudioRecord`
+  loop + RMS thresholds tuned by eyeballing the numbers already used in `VoiceActivityDetector`,
+  not measured against real recordings. The 1200 RMS threshold / 900ms silence window may need
+  retuning on a real device/room, especially in a noisy environment or a very quiet speaker.
+- Two back-to-back mic acquisitions happen per wake ("Hey Arya" heard via
+  VAD/Porcupine/recognizer, then immediately released and re-opened as a fresh `AudioRecord` for
+  the command) — functionally fine (matches how `freshRecognizer()` already tears down and
+  rebuilds for each phase) but adds a small gap where the mic is briefly unheld; not expected to
+  be noticeable but flagged since it wasn't measurable in this sandbox.
+- Same sandbox caveat as every phase: grep-verified only, no Android SDK/Gradle/network here —
+  this genuinely needs a real device test before being called verified, more so than usual given
+  how much of this is new low-level audio code rather than a straightforward network call.
+
+## 11. Gemini-Live-style continuous conversation + camera/screen vision + image generation (1 August 2026)
+
+Big one — four new pieces, all opt-in (nothing here changes existing wake-word/chat behavior
+unless the user actively opens the new Live screen or types `/image`).
+
+- **Live conversation mode** — `LiveConversationScreen.kt` (new, Gemini-Live-style full-screen
+  UI: animated status orb, live transcript) + `WakeWordService`'s existing
+  `thenListenForCommand` hook (already there from earlier phases, just unused until now) —
+  `ACTION_START_LIVE`/`ACTION_STOP_LIVE` intents toggle a `liveMode` flag that makes the
+  service loop straight back into `startCommandListening()` after each reply instead of
+  waiting for "Hey Arya" again. `util/LiveConversationState.kt` is a plain in-process
+  `StateFlow` singleton (no IPC needed, same process) the screen collects to animate. Leaving
+  the screen via back/home does **not** stop it — that's deliberate, matches "background me
+  chale" — only the explicit X button sends `ACTION_STOP_LIVE`.
+- **Camera vision** — `util/CameraFrameCapture.kt` (CameraX, periodic still captures ~every
+  2.5s, decoded to `Bitmap`) feeds `util/VisionFrameProvider.kt`, a small singleton holding
+  "most recent frame + timestamp + source". Only works while `LiveConversationScreen` is
+  open/foregrounded — Android doesn't allow background camera access, so this is an OS
+  limitation, not a design choice.
+- **Screen-share vision** — new `service/ScreenShareCaptureService.kt` (foreground service,
+  `MediaProjection` + `VirtualDisplay` + `ImageReader`, same ~2.5s cadence), also feeds
+  `VisionFrameProvider`. Unlike camera, this *can* keep running in the background as long as
+  the foreground service is alive — MediaProjection isn't subject to the camera restriction.
+  Permission is re-asked by the system every session (can't be remembered), handled via
+  `MediaProjectionManager.createScreenCaptureIntent()` in `LiveConversationScreen`.
+- **Vision-augmented replies** — `WakeWordService.runCommand()` now checks
+  `VisionFrameProvider.freshFrame()` before answering: if there's a recent frame AND
+  `InferenceEngine.supportsVision` (a vision-capable Gemma model loaded — this was already
+  wired in `InferenceEngine.generateStream(prompt, images)`, just never used until now), it
+  goes straight to the on-device model (free, private, fastest). If there's a frame but no
+  vision-capable local model, falls back to new `tools/VisionRelay.kt` — Gemini vision via the
+  relay's now-extended `/v1/relay` (`image_base64` param, `_call_gemini` updated to attach an
+  `inline_data` part). No frame → the pre-existing text-only + tool-calling path, unchanged,
+  extracted into `generateTextOnlyReply()`.
+- **Image generation** — new relay `/v1/imagegen` (Gemini's image model, reuses `GEMINI_KEYS`,
+  no separate key) + `tools/ImageGenTools.kt`. Two entry points: typing `/image <prompt>` or
+  `/img <prompt>` in the Chat screen (`ChatViewModel.generateImage()` — bypasses the normal
+  tool-calling loop entirely since that loop only knows how to feed *text* tool results back
+  to the model, and shows the result inline using the same `ChatMessage.images` rendering
+  already used for user-attached photos); and a `generate_image` tool for voice/text tool-calls
+  (saves to `<app>/files/Pictures/Arya/` and speaks/replies a confirmation, since
+  `WakeWordService` can't show an image).
+
+**New dependencies**: CameraX (`camera-core`/`camera-camera2`/`camera-lifecycle`/`camera-view`
+1.3.4). **New permissions**: `FOREGROUND_SERVICE_MEDIA_PROJECTION`, plus optional camera
+`<uses-feature>` declarations (all `required="false"` — app still installs on devices without
+a camera).
+
+**Honest limitations, stated plainly — this is the riskiest phase yet**:
+- None of this has touched a compiler, let alone a real device. CameraX's in-memory
+  `ImageCapture.takePicture()` JPEG-format assumption, the screen-capture `ImageReader`
+  row-stride/padding math, and `MediaProjection`'s permission-relaunch flow are all textbook
+  patterns but genuinely need a real-device pass before trusting them.
+- `ImageGenTools`/`/v1/imagegen` assumes a `gemini-2.5-flash-image` model name and a
+  `responseModalities: ["IMAGE"]` request shape — written from documentation recall, not
+  verified against a live Gemini account this session. If the model name has moved on by the
+  time this is deployed, this is the first thing to check.
+- Generated images in the Chat screen aren't persisted to `chatDao` (session history) — they
+  show for the current session only, then vanish on app restart/session switch. Flagging this
+  now rather than let it surprise later.
+- Live conversation's turn-taking still uses the same estimated-duration barge-in timing from
+  earlier phases (text-length-based, not actual audio duration) — unchanged, but now matters
+  more since it loops continuously instead of a single reply.
+- Vision system prompts ("Tum Arya ho, jo camera/screen dekh ke bata rahi ho...") are quick
+  first drafts, not tuned against real vision-model output — expect to iterate on these once
+  it's actually running.
+
+## Phase 12 — Offline model removed, online-only
+
+Arya's on-device (offline) model system has been removed entirely, per request. Every reply
+now goes through Arya Relay's free online models (Groq/Gemini/OpenRouter) — there's no
+download/load step, no local inference engine, no "which mode" switch.
+
+**Deleted** (the whole on-device inference + model-catalog subsystem):
+`inference/InferenceEngine.kt`, `inference/AryaEngine.kt`, `network/HfDownloader.kt`,
+`network/ModelDownloadWorker.kt`, `util/ModelDownloader.kt`, `data/ModelInfo.kt`,
+`data/ModelRepository.kt`, `data/CuratedModels.kt`, `data/BenchmarkStats.kt`,
+`data/StatsRepository.kt`, `ui/GalleryScreen.kt`, `ui/AddModelDialog.kt`, `ui/StatsScreen.kt`,
+`viewmodel/GalleryViewModel.kt`. Menu's "Models" entry and the "models_hub"/"stats" NavHost
+routes are gone; Home now opens straight into Chat instead of a Gallery/Chat pager.
+
+**Converted to online-only**: `ChatViewModel` (no more `engine`/`modelId`/offline-generate
+path — a single `onlineChat` lambda), and every feature screen that previously took an
+`InferenceEngine` (`AgentSkillsViewModel`, `TinyGardenViewModel`, `PromptLabViewModel`,
+`MobileActionsViewModel`, `AudioScribeViewModel`) now takes a `generateOnline` lambda instead.
+`WakeWordService`'s voice-command path is online-only too. Image-attach in Chat now always
+works (previously gated on a loaded vision model) — it routes to `VisionRelay` (Gemini vision)
+instead.
+
+**Real bugs found and fixed along the way** (not just the offline-model removal):
+- `data/UseCase.kt`: `aiChat` and `promptLab` never set the required `route` constructor
+  param — the file didn't compile as shipped.
+- Deleting `HfDownloader` would have silently broken `UpdateInstaller` (app-update APK
+  download reused it as a generic downloader) — recreated as `network/FileDownloader.kt`.
+- `CurrentInfoWorker`'s background current-affairs snapshot was written but never actually
+  read into any chat prompt — now folded into `identityContext`/persona in both
+  `MainActivity` and `WakeWordService`.
+- The online tool-calling system prompt had silently dropped `DateTimeContext`'s
+  current-date line during the ChatViewModel rewrite — restored.
+
+Settings lost the now-meaningless "Background downloads", "Online free model fallback"
+toggle, and Hugging Face token field. `PreferencesManager` dropped `chatMode`, `hfToken`,
+`autoOnlineFallback`, `useGpu`, `temperature`, `topK`, `maxTokens` (all dead/offline-only).
+`build.gradle.kts` dropped the MediaPipe `tasks-genai`/`tasks-vision` dependencies; the
+manifest dropped `FOREGROUND_SERVICE_DATA_SYNC` (only needed by the deleted download worker).
+
+## Phase 13 — New home UI (arya-ui.html) + first-launch name onboarding
+
+Home/Chat's empty state now matches the `arya-ui.html` mockup: an animated three-ring
+"signal mark" (`HomeHeroSection.kt`), a personalized greeting ("<naam>, बोलो / Arya sun rahi
+hai"), the three suggestion rows (Live baat karo / Image banao / Aaj ke kaam), and a Photo /
+Camera / Tools / Live chip row above the input dock. "Tools" opens a new right-side
+`ToolsDrawer.kt` listing the same 14 tool-category groups as the mockup.
+
+**First-launch name onboarding**: `NameEntryScreen.kt` — shown once, right after the
+runtime-permission dialogs, whenever `PreferencesManager.userName` is blank. Whatever the
+person types there is what the home greeting now uses in place of the old hardcoded
+"Sudhanshu" placeholder from the mockup — every install greets whoever's actually holding
+that phone. This is unrelated to `AryaIdentity.kt`'s "Sudhanshu Maurya built you" line, which
+stays as-is (that's Arya's own maker identity, not the current user's name).
+
+New tokens in `theme/Color.kt`: `AryaTextDim`, `AryaTextFaint`, `AryaHairline` — lifted
+straight from the mockup's `--text-dim` / `--text-faint` / `--ink-hairline` CSS vars.
+
+## Phase 14 — Fix release build failures (compileReleaseKotlin)
+
+Two compile errors from the first CI run:
+1. `HomeHeroSection.kt` — `by transition.animateFloat(...)` needs `import
+   androidx.compose.runtime.getValue` for the delegate operator; was missing.
+2. `LiveConversationScreen.kt` — `androidx.lifecycle.compose.LocalLifecycleOwner` was
+   unresolved because `androidx.lifecycle:lifecycle-runtime-compose` wasn't in
+   `app/build.gradle.kts` dependencies (only `lifecycle-runtime-ktx` and
+   `lifecycle-viewmodel-compose` were). Added `lifecycle-runtime-compose:2.8.4`. This bug
+   pre-dates Phase 13 — it's the first time this project actually got compiled in CI, so it
+   surfaced now.

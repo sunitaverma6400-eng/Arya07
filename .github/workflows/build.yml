@@ -1,0 +1,76 @@
+name: Build Arya release APK
+
+# Runs on every push to main (matches the Termux `git push -u origin main --force`
+# workflow you've been using), and can also be triggered manually from the Actions tab.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+# Needed for the "Create GitHub Release" step below to be allowed to publish — without this,
+# some repos' default token permissions block it with a 403.
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # app/build.gradle.kts targets Java 21 (sourceCompatibility/targetCompatibility) —
+      # keep this in sync if that ever changes.
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # NOTE: this repo doesn't currently ship gradlew/gradlew.bat/gradle-wrapper.jar
+      # (only gradle/wrapper/gradle-wrapper.properties, which just records the version to
+      # use). Rather than depend on a wrapper that isn't there, this step installs Gradle
+      # 8.7 directly — the same version gradle-wrapper.properties points at — so `gradle`
+      # is used below instead of `./gradlew`. If you later add the missing wrapper files
+      # (Android Studio: File > Sync, or `gradle wrapper` once locally with network
+      # access), switch the build step back to `./gradlew assembleRelease`.
+      - name: Set up Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      # Turns the ARYA_KEYSTORE_BASE64 secret (see FIXES_LOG.md / chat notes on how it was
+      # generated with `keytool` + `base64 -w 0`) back into an actual .keystore file that
+      # app/build.gradle.kts's signingConfigs.release can point ARYA_KEYSTORE_PATH at.
+      - name: Decode signing keystore
+        run: echo "$ARYA_KEYSTORE_BASE64" | base64 -d > "$RUNNER_TEMP/arya-release.keystore"
+        env:
+          ARYA_KEYSTORE_BASE64: ${{ secrets.ARYA_KEYSTORE_BASE64 }}
+
+      - name: Build signed release APK
+        run: gradle assembleRelease --no-daemon
+        env:
+          ARYA_RELAY_URL: ${{ secrets.ARYA_RELAY_URL }}
+          ARYA_RELAY_APP_SECRET: ${{ secrets.ARYA_RELAY_APP_SECRET }}
+          ARYA_KEYSTORE_PATH: ${{ runner.temp }}/arya-release.keystore
+          ARYA_KEYSTORE_PASSWORD: ${{ secrets.ARYA_KEYSTORE_PASSWORD }}
+          ARYA_KEY_ALIAS: ${{ secrets.ARYA_KEY_ALIAS }}
+          ARYA_KEY_PASSWORD: ${{ secrets.ARYA_KEY_PASSWORD }}
+
+      # Downloadable from the Actions run page even without creating a Release — good for
+      # quick testing on your own phone.
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: arya-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # Also publishes a permanent, shareable download link under the repo's Releases tab —
+      # tagged by run number so every build gets its own tag (build-1, build-2, ...).
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Arya build ${{ github.run_number }}
+          files: app/build/outputs/apk/release/*.apk
