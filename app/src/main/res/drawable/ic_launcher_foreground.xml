@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- "A" glyph in Signal violet on the Ink background — matches the app's redesigned token
+     system (ui/theme/Color.kt). The crossbar notch is Sprout green, a tiny nod to the
+     on-device/online duality that runs through the rest of the UI. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#7C5CFC"
+        android:pathData="M54,26 L76,82 L65,82 L59.5,67 L48.5,67 L43,82 L32,82 Z M51,57 L57,57 L54,46 Z" />
+    <path
+        android:fillColor="#34D399"
+        android:pathData="M54,46 L57,57 L51,57 Z" />
+</vector>
