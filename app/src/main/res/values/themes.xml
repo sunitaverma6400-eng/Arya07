@@ -1,0 +1,9 @@
+<resources>
+    <!-- The whole app is Compose now (single UI, single inference path) — Compose owns its
+         own Material 3 theming in ui/theme/Theme.kt (AryaTheme). This platform theme just
+         needs to exist for the manifest/launcher and stays intentionally minimal so it
+         doesn't fight with Compose's own colors during the brief pre-Compose window. -->
+    <style name="Theme.Arya" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@color/arya_window_background_light</item>
+    </style>
+</resources>

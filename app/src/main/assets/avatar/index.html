@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<!--
+  Arya's 3D face — WebView-hosted three.js + @pixiv/three-vrm scene.
+
+  WHY A WEBVIEW: VRM is a glTF-based format with a mature JS rendering ecosystem
+  (three-vrm) but essentially no native-Android renderer. Unity could host it
+  natively, but this app isn't a Unity app and pulling Unity-as-a-library in just
+  for one screen is a much bigger change than embedding a WebView. This is the
+  same approach VTuber web-avatar tools and several React Native / Flutter VRM
+  viewers use.
+
+  WHAT YOU STILL NEED TO SUPPLY (can't be generated from code):
+    app/src/main/assets/avatar/model.vrm
+  Any VRM 0.x or 1.0 humanoid avatar works. Free options: VRoid Studio (make your
+  own, vroid.com/en/studio) or VRoid Hub (download others' shared models, check
+  each model's individual license/redistribution terms before shipping it in an
+  APK). Until model.vrm exists here, avatar.js reports a load error over the JS
+  bridge and LiveConversationScreen falls back to the existing hand-drawn Canvas
+  face (see VrmAvatarView.kt).
+-->
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <style>
+    html, body { margin: 0; padding: 0; overflow: hidden; background: transparent; width: 100%; height: 100%; }
+    #canvas-holder { width: 100%; height: 100%; }
+    canvas { display: block; touch-action: none; }
+  </style>
+</head>
+<body>
+  <div id="canvas-holder"></div>
+
+  <!-- CDN builds — the device needs internet the first time to fetch/cache these
+       (standard WebView HTTP cache applies after). If you want this to work fully
+       offline, download these three files and swap the src to a local
+       assets/avatar/lib/ path instead. -->
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/build/three.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/three@0.158.0/examples/js/loaders/GLTFLoader.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@pixiv/three-vrm@2.1.0/lib/three-vrm.min.js"></script>
+  <script src="avatar.js"></script>
+</body>
+</html>

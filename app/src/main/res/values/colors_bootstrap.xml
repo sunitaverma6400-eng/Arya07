@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches ui/theme/Color.kt's AryaPaper/AryaInk so there's no flash of an unrelated
+         color between the platform window showing and Compose taking over. -->
+    <color name="arya_window_background_light">#FAF8FF</color>
+    <color name="arya_window_background_dark">#14121A</color>
+</resources>
