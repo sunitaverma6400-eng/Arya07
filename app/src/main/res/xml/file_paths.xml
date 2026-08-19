@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<paths>
+    <cache-path name="exports" path="exports/" />
+    <cache-path name="updates" path="updates/" />
+    <cache-path name="generated" path="generated/" />
+    <files-path name="images" path="images/" />
+    <!-- Matches ImageGenTools.saveToGallery's getExternalFilesDir(DIRECTORY_PICTURES)/Arya
+         folder — needed so FileProvider.getUriForFile can grant a share Intent access to a
+         saved image (see ui/ImageViewerDialog.kt's share button); without this entry,
+         getUriForFile throws for any file under that folder. -->
+    <external-files-path name="pictures" path="Pictures/Arya/" />
+</paths>
